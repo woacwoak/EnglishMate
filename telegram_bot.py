@@ -9,10 +9,23 @@ from telegram.ext import (
 )
 import re
 import httpx
+from flask import Flask
+import threading
 
 # Define conversation states
 GET_WORD = range(1)
 
+# ---------------- WEB SERVER FOR RENDER ----------------
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Bot is running!"
+
+def run_flask_app():
+    # Render provides the PORT environment variable.
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -207,6 +220,11 @@ async def error(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
+    # Start the Flask app in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.daemon = True
+    flask_thread.start()
+
     print("Starting AI English quiz bot with buttons...")
     app = Application.builder().token(TOKEN).build()
 
