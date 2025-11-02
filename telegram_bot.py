@@ -5,9 +5,14 @@ from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+    Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters, ConversationHandler
 )
 import re
+import httpx
+
+# Define conversation states
+GET_WORD = range(1)
+
 
 # ---------------- LOAD ENV ----------------
 load_dotenv()
@@ -78,7 +83,62 @@ def generate_ai_question():
         print("Error generating AI question:", e)
         return "⚠️ Could not generate a question right now.", {"A": "A", "B": "B", "C": "C"}, None
 
+# ---------------- DICTIONARY FUNCTION ----------------
+async def get_word_definition(word: str):
+    """
+    Fetches the definition of a word from the DictionaryAPI.
+    Returns a formatted string with the definition or an error message.
+    """
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()  # Raise an exception for bad status codes
+            data = response.json()
+
+            # Format the response
+            definition_text = f"📖 **{data[0]['word']}**\n\n"
+            for meaning in data[0]['meanings']:
+                definition_text += f"*{meaning['partOfSpeech']}*\n"
+                for i, definition in enumerate(meaning['definitions'][:2]):  # Max 2 definitions per part of speech
+                    definition_text += f"{i+1}. {definition['definition']}\n"
+                    if 'example' in definition:
+                        definition_text += f"   _Example: {definition['example']}_\n"
+                definition_text += "\n"
+            return definition_text
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"😕 Sorry, I couldn't find a definition for **{word}**."
+        else:
+            return "⚠️ An error occurred while fetching the definition."
+    except Exception:
+        return "⚠️ An error occurred. Please try again."
+
+
 # ---------------- COMMAND HANDLERS ----------------
+async def dictionary_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Starts the dictionary conversation and asks for a word."""
+    await update.message.reply_text("Please send me the word you'd like to define.")
+    return GET_WORD
+
+async def get_definition_from_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Fetches the definition for the word provided by the user."""
+    word = update.message.text
+    await update.message.reply_text(f"⏳ Searching for the definition of **{word}**...", parse_mode='Markdown')
+    
+    definition = await get_word_definition(word)
+    await update.message.reply_text(definition, parse_mode='Markdown')
+    
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancels and ends the conversation."""
+    await update.message.reply_text("Operation cancelled.")
+    return ConversationHandler.END
+
+
+
 async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, chat_id: int):
     question, options, answer = generate_ai_question()
     if answer is None:
@@ -96,16 +156,17 @@ async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE, cha
     await context.bot.send_message(chat_id=chat_id, text=question, reply_markup=reply_markup)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello! Ready to learn English? Type /learn to start the quiz!")
+    await update.message.reply_text("👋 Hello! Ready to learn English? Type /learn to start the quiz! /stop to stop it and /dictionary to learn the meaning of the word.")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💡 I am your AI English teacher! Use /learn to get a question, /stop to stop the quiz."
+        "💡 I am your AI English teacher! Use /learn to get a question, /stop to stop the quiz. /dictionary to learn the meaning of the word."
     )
 
 async def learn_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Generating your English question...")
     await _send_question(update, context, update.message.chat_id)
+
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("current_question", None)
@@ -149,7 +210,18 @@ if __name__ == "__main__":
     print("Starting AI English quiz bot with buttons...")
     app = Application.builder().token(TOKEN).build()
 
-    # Command handlers
+    # Set up the conversation handler for the dictionary
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("dictionary", dictionary_start)],
+        states={
+            GET_WORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_definition_from_user)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    app.add_handler(conv_handler)
+
+    # Other command handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("learn", learn_command))
